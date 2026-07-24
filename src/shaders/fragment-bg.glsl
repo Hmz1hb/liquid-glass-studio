@@ -32,6 +32,11 @@ uniform sampler2D u_textSDF;
 uniform int u_textEnabled;
 uniform float u_textScale;
 
+uniform vec4 u_lights[3];       // x, y, intensity, radius per light
+uniform vec4 u_lightColors[3];  // r, g, b, unused per light
+uniform int u_lightCount;       // 0-3
+uniform float u_colorBleedIntensity; // how much glass tints nearby bg (0-1)
+
 float chessboard(vec2 uv, float size, int mode) {
   float yBars = step(size * 2.0, mod(uv.y * 2.0, size * 4.0));
   float xBars = step(size * 2.0, mod(uv.x * 2.0, size * 4.0));
@@ -128,6 +133,42 @@ float sdHexagon(vec2 p, float r) {
   return length(p) * sign(p.y);
 }
 
+float sdPill(vec2 p, float w, float h) {
+  p.y -= clamp(p.y, -h * 0.5, h * 0.5);
+  return length(p) - w * 0.5;
+}
+
+float sdCross(vec2 p, vec2 b, float r) {
+  p = abs(p);
+  p = (p.y > p.x) ? p.yx : p.xy;
+  vec2 q = p - b;
+  float k = max(q.y, q.x);
+  vec2 w;
+  if (k > 0.0) {
+    w = max(q, 0.0);
+  } else {
+    w = vec2(b.y - p.x, -k);
+  }
+  return sign(k) * length(w) - r;
+}
+
+float sdHeart(vec2 p, float r) {
+  p = p / r;
+  p.x = abs(p.x);
+  if (p.y + p.x > 1.0) {
+    return (sqrt(dot(p - vec2(0.25, 0.75), p - vec2(0.25, 0.75))) - sqrt(2.0) / 4.0) * r;
+  }
+  return (sqrt(min(dot(p - vec2(0.0, 1.0), p - vec2(0.0, 1.0)),
+                    dot(p - 0.5 * max(p.x + p.y, 0.0), p - 0.5 * max(p.x + p.y, 0.0)))) *
+          sign(p.x - p.y)) * r;
+}
+
+vec2 rotate2D(vec2 p, float angle) {
+  float c = cos(angle);
+  float s = sin(angle);
+  return vec2(c * p.x - s * p.y, s * p.x + c * p.y);
+}
+
 float shapeSDF(vec2 pn, float shapeW, float shapeH, float shapeR, float shapeN, int shapeType) {
   float rY = u_resolution.y;
   if (shapeType == 1) {
@@ -141,15 +182,21 @@ float shapeSDF(vec2 pn, float shapeW, float shapeH, float shapeR, float shapeN, 
   } else if (shapeType == 4) {
     float s = min(shapeW, shapeH) * u_dpr * 0.5 / rY;
     return sdHexagon(pn, s);
+  } else if (shapeType == 5) {
+    float w = shapeW * u_dpr / rY;
+    float h = shapeH * u_dpr / rY;
+    return sdPill(pn, w, h);
+  } else if (shapeType == 6) {
+    float w = shapeW * u_dpr * 0.5 / rY;
+    float h = shapeH * u_dpr * 0.5 / rY;
+    float armW = min(w, h) * 0.35;
+    return sdCross(pn, vec2(w, armW), shapeR * u_dpr * 0.01 / rY);
+  } else if (shapeType == 7) {
+    float s = min(shapeW, shapeH) * u_dpr * 0.5 / rY;
+    return sdHeart(vec2(pn.x, -pn.y), s);
   } else {
     return roundedRectSDF(pn, vec2(0.0), shapeW / rY, shapeH / rY, shapeR / rY, shapeN);
   }
-}
-
-float sdgMin(float a, float b) {
-  return a < b
-    ? a
-    : b;
 }
 
 float mainSDF(vec2 p1, vec2 p2, vec2 p) {
@@ -165,7 +212,11 @@ float mainSDF(vec2 p1, vec2 p2, vec2 p) {
       float shapeR = u_shapeParams[i].x;
       float shapeN = u_shapeParams[i].y;
       int shapeType = int(u_shapeParams[i].z);
+      float shapeRotation = u_shapeParams[i].w;
       vec2 pn = (-shapeCenter) / u_resolution.y + p / u_resolution.y;
+      if (abs(shapeRotation) > 0.001) {
+        pn = rotate2D(pn, shapeRotation);
+      }
       float dd = shapeSDF(pn, shapeW, shapeH, shapeR, shapeN, shapeType);
       if (!hasShape) {
         result = dd;
@@ -265,6 +316,21 @@ void main() {
   float merged = mainSDF(p1, p2, gl_FragCoord.xy);
 
   float shadow = exp(-1.0 / u_shadowExpand * abs(merged) * u_resolution1x.y) * 0.6 * u_shadowFactor;
+
+  // Light color bleeding onto background
+  if (u_lightCount > 0 && u_colorBleedIntensity > 0.0) {
+    for (int i = 0; i < 3; i++) {
+      if (i >= u_lightCount) break;
+      vec2 lightPos = u_lights[i].xy;
+      float lightIntensity = u_lights[i].z;
+      float lightRadius = u_lights[i].w;
+      vec3 lightColor = u_lightColors[i].rgb;
+
+      float dist = length(gl_FragCoord.xy - lightPos) / u_resolution.y;
+      float influence = exp(-dist * 3.0 / max(lightRadius, 0.01)) * lightIntensity * u_colorBleedIntensity;
+      bgColor += lightColor * influence * 0.15;
+    }
+  }
 
   fragColor = vec4(bgColor - vec3(shadow), 1.0);
 }

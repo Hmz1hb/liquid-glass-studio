@@ -31,6 +31,8 @@ import clsx from 'clsx';
 import { capitalize, computeGaussianKernelByRadius } from './utils';
 import { EditorMode, createDefaultShape, SHAPE_TYPE_INDEX } from './components/EditorMode';
 import type { ShapeDef } from './components/EditorMode';
+import { LightEditor, createDefaultLight } from './components/LightEditor/LightEditor';
+import type { LightDef } from './components/LightEditor/LightEditor';
 
 import bgGrid from '@/assets/bg-grid.png';
 import bgBars from '@/assets/bg-bars.png';
@@ -58,6 +60,10 @@ import {
   type UIContentType,
 } from './utils/uiContentRenderer';
 import { generateTextSDF, uploadTextSDFTexture, SDF_RANGE } from './utils/textSDF';
+import { exportCanvasPNG, decodePresetFromURL, encodePresetToURL, CanvasRecorder, downloadBlob, savePresetToStorage, loadPresetsFromStorage, deletePresetFromStorage } from './utils/exportUtils';
+import type { SavedPreset } from './utils/exportUtils';
+import { KeyboardShortcutManager } from './utils/keyboardShortcuts';
+import { PhysicsEngine } from './utils/physicsEngine';
 
 // WebGPU imports
 import { WebGPUMultiPassRenderer, isWebGPUAvailable } from './utils/WebGPURenderer';
@@ -67,6 +73,15 @@ import WGSLFragmentBgShader from './shaders/wgsl/fragment-bg.wgsl?raw';
 import WGSLFragmentBgVblurShader from './shaders/wgsl/fragment-bg-vblur.wgsl?raw';
 import WGSLFragmentBgHblurShader from './shaders/wgsl/fragment-bg-hblur.wgsl?raw';
 import WGSLFragmentMainShader from './shaders/wgsl/fragment-main.wgsl?raw';
+
+// Sellmeier presets: B and C coefficients
+const SELLMEIER_PRESETS: Record<string, { B: [number, number, number]; C: [number, number, number] }> = {
+  crown: { B: [1.03961, 0.23179, 1.01047], C: [0.00600, 0.02002, 103.56] },
+  flint: { B: [1.34534, 0.20907, 0.93736], C: [0.00998, 0.04706, 111.89] },
+  diamond: { B: [0.33061, 4.33566, 0.0], C: [0.01750, 0.10640, 0.0] },
+  water: { B: [0.75831, 0.08495, 0.0], C: [0.01008, 8.91377, 0.0] },
+  custom: { B: [1.0, 0.2, 1.0], C: [0.006, 0.02, 100.0] },
+};
 
 function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -83,8 +98,29 @@ function App() {
   // Editor mode shape state
   const [editorShapes, setEditorShapes] = useState<ShapeDef[]>([]);
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
+  const [multiSelectedIds, setMultiSelectedIds] = useState<Set<string>>(new Set());
   const editorShapesRef = useRef<ShapeDef[]>([]);
   editorShapesRef.current = editorShapes;
+
+  // Physics engine
+  const physicsRef = useRef(new PhysicsEngine());
+  const dragVelocityRef = useRef<{ id: string; lastX: number; lastY: number; lastTime: number } | null>(null);
+
+  // Light editor state
+  const [lights, setLights] = useState<LightDef[]>([]);
+  const lightsRef = useRef<LightDef[]>([]);
+  lightsRef.current = lights;
+
+  // Fullscreen mode
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Video recording state
+  const [isRecording, setIsRecording] = useState(false);
+  const recorderRef = useRef<CanvasRecorder | null>(null);
+
+  // User preset state
+  const [userPresets, setUserPresets] = useState<SavedPreset[]>(() => loadPresetsFromStorage());
+  const [showPresetMenu, setShowPresetMenu] = useState(false);
 
   // Showcase animation state
   const [activeShowcase, setActiveShowcase] = useState<string | null>(null);
@@ -363,6 +399,17 @@ function App() {
   controlsAPIRef.current = controlsAPI;
   stateRef.current.langName = langName;
 
+  // Load preset from URL hash on mount
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (hash) {
+      const preset = decodePresetFromURL(hash);
+      if (preset && typeof controlsAPI === 'function') {
+        controlsAPI(preset);
+      }
+    }
+  }, []);
+
   // Sync WebGPU toggle from controls to state (triggers effect re-run)
   useEffect(() => {
     if (controls.useWebGPU !== useWebGPU) {
@@ -381,12 +428,76 @@ function App() {
         initial.height = controls.shapeHeight;
         initial.radius = controls.shapeRadius;
         initial.roundness = controls.shapeRoundness;
+        initial.rotation = 0;
+        initial.zIndex = 0;
         setEditorShapes([initial]);
         setSelectedShapeId(initial.id);
       }
     }
     prevEditorMode.current = controls.editorMode;
   }, [controls.editorMode]);
+
+  // Phase 5: Wrap setEditorShapes to track drag velocity for physics impulses
+  const handleShapesChange = useCallback((newShapes: ShapeDef[] | ((prev: ShapeDef[]) => ShapeDef[])) => {
+    setEditorShapes((prev) => {
+      const shapes = typeof newShapes === 'function' ? newShapes(prev) : newShapes;
+      const physics = physicsRef.current;
+      if (physics.isEnabled()) {
+        const now = performance.now();
+        for (const s of shapes) {
+          const old = prev.find(p => p.id === s.id);
+          if (old && (old.x !== s.x || old.y !== s.y)) {
+            // Shape moved - track velocity
+            const vel = dragVelocityRef.current;
+            if (vel && vel.id === s.id) {
+              const dt = Math.max(now - vel.lastTime, 1) / 1000;
+              const vx = (s.x - vel.lastX) / dt;
+              const vy = (s.y - vel.lastY) / dt;
+              vel.lastX = s.x;
+              vel.lastY = s.y;
+              vel.lastTime = now;
+              // Update rest position while dragging
+              physics.setPosition(s.id, s.x, s.y);
+            } else {
+              dragVelocityRef.current = { id: s.id, lastX: s.x, lastY: s.y, lastTime: now };
+              physics.setPosition(s.id, s.x, s.y);
+            }
+          }
+        }
+        // Check for drag end: if a shape that was being tracked hasn't moved, apply impulse
+        if (dragVelocityRef.current) {
+          const velShape = shapes.find(s => s.id === dragVelocityRef.current!.id);
+          const oldShape = prev.find(s => s.id === dragVelocityRef.current!.id);
+          if (velShape && oldShape && velShape.x === oldShape.x && velShape.y === oldShape.y) {
+            // No movement this frame - drag likely ended
+            // Impulse is handled via the velocity already tracked
+          }
+        }
+      }
+      return shapes;
+    });
+  }, []);
+
+  // Sync light count from controls
+  const prevLightCount = useRef(0);
+  useEffect(() => {
+    const targetCount = controls.lightCount;
+    if (targetCount !== prevLightCount.current) {
+      setLights((prev) => {
+        if (targetCount > prev.length) {
+          const newLights = [...prev];
+          for (let i = prev.length; i < targetCount; i++) {
+            newLights.push(createDefaultLight(i, canvasInfo.width, canvasInfo.height));
+          }
+          return newLights;
+        } else if (targetCount < prev.length) {
+          return prev.slice(0, targetCount);
+        }
+        return prev;
+      });
+      prevLightCount.current = targetCount;
+    }
+  }, [controls.lightCount, canvasInfo.width, canvasInfo.height]);
 
   // useEffect(() => {
   //   setLangName(controls.language[0] as keyof typeof languages);
@@ -411,6 +522,96 @@ function App() {
       preShowcaseControls.current = null;
     }
   }, [controlsAPI]);
+
+  const handleExportPNG = useCallback(() => {
+    if (canvasRef.current) {
+      exportCanvasPNG(canvasRef.current, 'liquid-glass.png', 1);
+    }
+  }, []);
+
+  const handleShareURL = useCallback(() => {
+    const encoded = encodePresetToURL(controls);
+    if (encoded) {
+      window.location.hash = encoded;
+      navigator.clipboard?.writeText(window.location.href).catch(() => {});
+    }
+  }, [controls]);
+
+  const toggleFullscreen = useCallback(() => {
+    setIsFullscreen((v) => !v);
+  }, []);
+
+  // Video recording handlers
+  const handleStartRecording = useCallback(() => {
+    if (!canvasRef.current || isRecording) return;
+    const recorder = new CanvasRecorder();
+    const ok = recorder.start(canvasRef.current, 30);
+    if (ok) {
+      recorderRef.current = recorder;
+      setIsRecording(true);
+    }
+  }, [isRecording]);
+
+  const handleStopRecording = useCallback(async () => {
+    if (!recorderRef.current) return;
+    const blob = await recorderRef.current.stop();
+    recorderRef.current = null;
+    setIsRecording(false);
+    if (blob) {
+      downloadBlob(blob, `liquid-glass-${Date.now()}.webm`);
+    }
+  }, []);
+
+  const handleToggleRecording = useCallback(() => {
+    if (isRecording) {
+      handleStopRecording();
+    } else {
+      handleStartRecording();
+    }
+  }, [isRecording, handleStartRecording, handleStopRecording]);
+
+  // User preset handlers
+  const handleSavePreset = useCallback(() => {
+    const name = prompt('Preset name:');
+    if (!name) return;
+    savePresetToStorage(name, controls);
+    setUserPresets(loadPresetsFromStorage());
+  }, [controls]);
+
+  const handleLoadPreset = useCallback((preset: SavedPreset) => {
+    if (typeof controlsAPI === 'function') {
+      controlsAPI(preset.values);
+    }
+    setShowPresetMenu(false);
+  }, [controlsAPI]);
+
+  const handleDeletePreset = useCallback((id: string) => {
+    deletePresetFromStorage(id);
+    setUserPresets(loadPresetsFromStorage());
+  }, []);
+
+  // Close preset menu when clicking outside
+  useEffect(() => {
+    if (!showPresetMenu) return;
+    const onClick = () => setShowPresetMenu(false);
+    document.addEventListener('click', onClick);
+    return () => document.removeEventListener('click', onClick);
+  }, [showPresetMenu]);
+
+  // Keyboard shortcuts via KeyboardShortcutManager
+  useEffect(() => {
+    const mgr = new KeyboardShortcutManager();
+    mgr.registerMany([
+      { key: 'f', description: 'Toggle fullscreen', action: () => setIsFullscreen((v) => !v) },
+      { key: 'Escape', description: 'Exit fullscreen', action: () => setIsFullscreen(false) },
+      { key: '/', shift: true, description: 'Show keyboard shortcuts', action: () => {
+        const shortcuts = mgr.getAll();
+        const msg = shortcuts.map((s) => `${mgr.getShortcutLabel(s)}: ${s.description}`).join('\n');
+        alert('Keyboard Shortcuts:\n\n' + msg);
+      }},
+    ]);
+    return () => mgr.dispose();
+  }, []);
 
   const centerizeCanvasWindow = useCallback(() => {
     const ctrl = stateRef.current.canvasWindowCtrlRef;
@@ -768,8 +969,46 @@ function App() {
             (Math.abs(stateRef.current.mouseSpringSpeed.y) * controls.shapeHeight * controls.springSizeFactor) / 100,
         };
 
-        const editorShapes = editorShapesRef.current;
+        let editorShapes = editorShapesRef.current;
         const isEditorMode = controls.editorMode && editorShapes.length > 0;
+
+        // Phase 5: Physics step
+        const physics = physicsRef.current;
+        physics.setEnabled(controls.physicsEnabled && isEditorMode);
+        physics.setGravity(controls.physicsGravity);
+        physics.setGlobalDamping(controls.physicsDamping);
+
+        if (physics.isEnabled()) {
+          // Sync physics bodies with editor shapes
+          const editorShapeIds = new Set(editorShapes.map(s => s.id));
+          // Remove orphaned physics bodies for deleted shapes
+          for (const bodyId of physics.getBodyIds()) {
+            if (!editorShapeIds.has(bodyId)) {
+              physics.removeBody(bodyId);
+            }
+          }
+          for (const s of editorShapes) {
+            const body = physics.getBody(s.id);
+            if (!body) {
+              physics.addBody(s.id, s.x, s.y, s.width, s.height, controls.physicsStiffness);
+            } else {
+              body.springStiffness = controls.physicsStiffness;
+              body.width = s.width;
+              body.height = s.height;
+            }
+          }
+
+          const updates = physics.step();
+          if (updates.size > 0) {
+            const newShapes = editorShapes.map(s => {
+              const update = updates.get(s.id);
+              if (update) return { ...s, x: update.x, y: update.y };
+              return s;
+            });
+            editorShapes = newShapes;
+            editorShapesRef.current = newShapes;
+          }
+        }
 
         const shapeData: number[] = [];
         const shapeParamsData: number[] = [];
@@ -784,7 +1023,7 @@ function App() {
               const sr = ((Math.min(sw, sh) / 2) * s.radius) / 100;
               const shapeTypeIdx = SHAPE_TYPE_INDEX[s.type] ?? 0;
               shapeData.push(sx, sy, sw, sh);
-              shapeParamsData.push(sr, s.roundness, shapeTypeIdx, 0);
+              shapeParamsData.push(sr, s.roundness, shapeTypeIdx, s.rotation ?? 0);
             } else {
               shapeData.push(0, 0, 0, 0);
               shapeParamsData.push(0, 2, 0, 0);
@@ -903,6 +1142,21 @@ function App() {
             ? stateRef.current.uiContentTexture : undefined;
         }
 
+        // Build lighting uniform data
+        const currentLights = lightsRef.current;
+        const lightPositions: number[] = [];
+        const lightColors: number[] = [];
+        for (let i = 0; i < 3; i++) {
+          if (i < currentLights.length) {
+            const l = currentLights[i];
+            lightPositions.push(l.x * canvasInfo.dpr, l.y * canvasInfo.dpr, l.intensity, l.radius);
+            lightColors.push(l.color.r / 255, l.color.g / 255, l.color.b / 255, 0);
+          } else {
+            lightPositions.push(0, 0, 0, 0);
+            lightColors.push(0, 0, 0, 0);
+          }
+        }
+
         renderer.render({
           bgPass: {
             u_bgType: controls.bgType,
@@ -916,6 +1170,16 @@ function App() {
             u_textSDF: textSDFTexture,
             u_textEnabled: controls.textEnabled ? 1 : 0,
             u_textScale: 2 * SDF_RANGE,
+            u_lightCount: currentLights.length,
+            u_lights: lightPositions,
+            u_lightColors: lightColors,
+            u_bevelWidth: controls.bevelWidth,
+            u_edgeGlowIntensity: controls.edgeGlowIntensity,
+            u_edgeGlowColor: [
+              controls.edgeGlowColor.r / 255,
+              controls.edgeGlowColor.g / 255,
+              controls.edgeGlowColor.b / 255,
+            ],
           },
           mainPass: {
             u_tint: [
@@ -955,6 +1219,55 @@ function App() {
             u_textSDF: textSDFTexture,
             u_textEnabled: controls.textEnabled ? 1 : 0,
             u_textScale: 2 * SDF_RANGE,
+            u_lightCount: currentLights.length,
+            u_lights: lightPositions,
+            u_lightColors: lightColors,
+            u_specularPower: controls.specularPower,
+            u_specularIntensity: controls.specularIntensity,
+            u_causticsEnabled: controls.causticsEnabled ? 1 : 0,
+            u_causticsScale: controls.causticsScale,
+            u_causticsIntensity: controls.causticsIntensity,
+            u_bevelWidth: controls.bevelWidth,
+            u_edgeGlowIntensity: controls.edgeGlowIntensity,
+            u_edgeGlowColor: [
+              controls.edgeGlowColor.r / 255,
+              controls.edgeGlowColor.g / 255,
+              controls.edgeGlowColor.b / 255,
+            ],
+            u_colorBleedIntensity: controls.colorBleedIntensity,
+            // Phase 3 Material uniforms
+            u_roughness: controls.roughness,
+            u_reflectionIntensity: controls.reflectionIntensity,
+            u_dofIntensity: controls.dofIntensity,
+            u_frostedEdge: controls.frostedEdge,
+            u_sellmeierEnabled: controls.sellmeierEnabled ? 1 : 0,
+            u_sellmeierB: (SELLMEIER_PRESETS[controls.sellmeierPreset] || SELLMEIER_PRESETS.crown).B,
+            u_sellmeierC: (SELLMEIER_PRESETS[controls.sellmeierPreset] || SELLMEIER_PRESETS.crown).C,
+            u_multiBounce: controls.multiBounce ? 1 : 0,
+            u_glassOnGlass: 0, // placeholder for future
+            // Phase 4 Surface Detail
+            u_smudgeEnabled: controls.smudgeEnabled ? 1 : 0,
+            u_smudgeIntensity: controls.smudgeIntensity,
+            u_scratchEnabled: controls.scratchEnabled ? 1 : 0,
+            u_scratchDensity: controls.scratchDensity,
+            u_scratchDepth: controls.scratchDepth,
+            u_scratchAngle: (controls.scratchAngle * Math.PI) / 180,
+            u_bubbleEnabled: controls.bubbleEnabled ? 1 : 0,
+            u_bubbleCount: controls.bubbleCount,
+            u_bubbleSeed: 42.0,
+            u_bubbleSize: controls.bubbleSize,
+            u_dustEnabled: controls.dustEnabled ? 1 : 0,
+            u_dustDensity: controls.dustDensity,
+            u_dustBrightness: controls.dustBrightness,
+            // Phase 5 Animation uniforms
+            u_time: elapsedTime,
+            u_flowEnabled: controls.flowEnabled ? 1 : 0,
+            u_flowSpeed: controls.flowSpeed,
+            u_flowScale: controls.flowScale,
+            u_flowIntensity: controls.flowIntensity,
+            u_pulseEnabled: controls.pulseEnabled ? 1 : 0,
+            u_pulseAmplitude: controls.pulseAmplitude,
+            u_pulseFrequency: controls.pulseFrequency,
             STEP: controls.step,
           },
         });
@@ -986,40 +1299,146 @@ function App() {
 
   return (
     <>
-      {levaGlobal}
-      <header className={styles.header}>
-        <div className={styles.logoWrapper}>
-          <div className={styles.title}>Liquid Glass Studio</div>
-          <div className={styles.subtitle}>{lang['ui.subtitle']}</div>
-        </div>
-        <div className={styles.content}>
-          <span>
-            by <a>iyinchao</a>
-          </span>
-          <a
-            href="https://github.com/iyinchao/liquid-glass-studio"
-            target="_blank"
-            className={styles.button}
-          >
-            <GitHubIcon />
-          </a>
-          <a
-            href="https://x.com/charles_yin/status/1936338569267986605"
-            target="_blank"
-            className={styles.button}
-          >
-            <XIcon></XIcon>
-          </a>
-        </div>
-      </header>
-      <PresetControls
-        controls={controls}
-        controlsAPI={controlsAPI}
-        lang={lang}
-        activeShowcase={activeShowcase}
-        onStartShowcase={startShowcase}
-        onStopShowcase={stopShowcase}
-      />
+      {!isFullscreen && levaGlobal}
+      {!isFullscreen && (
+        <header className={styles.header}>
+          <div className={styles.logoWrapper}>
+            <div className={styles.title}>Liquid Glass Studio</div>
+            <div className={styles.subtitle}>{lang['ui.subtitle']}</div>
+          </div>
+          <div className={styles.content}>
+            <span>
+              by <a>iyinchao</a>
+            </span>
+            <button
+              className={styles.button}
+              onClick={handleExportPNG}
+              title="Export PNG"
+              style={{ fontSize: '11px', padding: '4px 8px', cursor: 'pointer', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '4px', color: 'white' }}
+            >
+              PNG
+            </button>
+            <button
+              className={styles.button}
+              onClick={handleShareURL}
+              title="Copy share URL"
+              style={{ fontSize: '11px', padding: '4px 8px', cursor: 'pointer', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '4px', color: 'white' }}
+            >
+              Share
+            </button>
+            <button
+              className={styles.button}
+              onClick={handleToggleRecording}
+              title={isRecording ? 'Stop recording' : 'Record video'}
+              style={{
+                fontSize: '11px',
+                padding: '4px 8px',
+                cursor: 'pointer',
+                background: isRecording ? 'rgba(255,60,60,0.3)' : 'rgba(255,255,255,0.1)',
+                border: isRecording ? '1px solid rgba(255,60,60,0.6)' : '1px solid rgba(255,255,255,0.2)',
+                borderRadius: '4px',
+                color: isRecording ? '#ff6b6b' : 'white',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+              }}
+            >
+              {isRecording && (
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#ff4444', display: 'inline-block', animation: 'pulse 1s infinite' }} />
+              )}
+              {isRecording ? 'Stop' : 'REC'}
+            </button>
+            <div style={{ position: 'relative', display: 'inline-block' }}>
+              <button
+                className={styles.button}
+                onClick={handleSavePreset}
+                title="Save current settings as preset"
+                style={{ fontSize: '11px', padding: '4px 8px', cursor: 'pointer', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '4px', color: 'white' }}
+              >
+                Save
+              </button>
+              {userPresets.length > 0 && (
+                <button
+                  className={styles.button}
+                  onClick={(e) => { e.stopPropagation(); setShowPresetMenu((v) => !v); }}
+                  title="Load saved preset"
+                  style={{ fontSize: '11px', padding: '4px 8px', cursor: 'pointer', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '4px', color: 'white', marginLeft: '2px' }}
+                >
+                  My Presets
+                </button>
+              )}
+              {showPresetMenu && userPresets.length > 0 && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: '100%',
+                    right: 0,
+                    marginTop: 4,
+                    background: 'rgba(30,30,40,0.95)',
+                    border: '1px solid rgba(255,255,255,0.15)',
+                    borderRadius: 6,
+                    padding: '4px 0',
+                    minWidth: 160,
+                    zIndex: 1000,
+                    backdropFilter: 'blur(10px)',
+                  }}
+                >
+                  {userPresets.map((p) => (
+                    <div
+                      key={p.id}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '5px 10px',
+                        fontSize: 11,
+                        color: 'white',
+                        cursor: 'pointer',
+                      }}
+                      onClick={() => handleLoadPreset(p)}
+                      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.1)'; }}
+                      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                    >
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110 }}>{p.name}</span>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleDeletePreset(p.id); }}
+                        style={{ background: 'none', border: 'none', color: 'rgba(255,100,100,0.7)', cursor: 'pointer', fontSize: 11, padding: '0 2px' }}
+                        title="Delete preset"
+                      >
+                        x
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <a
+              href="https://github.com/iyinchao/liquid-glass-studio"
+              target="_blank"
+              className={styles.button}
+            >
+              <GitHubIcon />
+            </a>
+            <a
+              href="https://x.com/charles_yin/status/1936338569267986605"
+              target="_blank"
+              className={styles.button}
+            >
+              <XIcon></XIcon>
+            </a>
+          </div>
+        </header>
+      )}
+      {!isFullscreen && (
+        <PresetControls
+          controls={controls}
+          controlsAPI={controlsAPI}
+          lang={lang}
+          activeShowcase={activeShowcase}
+          onStartShowcase={startShowcase}
+          onStopShowcase={stopShowcase}
+        />
+      )}
       <ResizableWindow
         disableMove
         size={canvasInfo}
@@ -1054,17 +1473,47 @@ function App() {
               <span>{perfInfo.frameMs}ms</span>
             </div>
           )}
+          {isRecording && (
+            <div style={{
+              position: 'absolute',
+              top: 8,
+              left: 8,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              background: 'rgba(0,0,0,0.5)',
+              padding: '4px 10px',
+              borderRadius: 4,
+              color: '#ff4444',
+              fontSize: 11,
+              fontWeight: 600,
+              zIndex: 100,
+              pointerEvents: 'none',
+            }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#ff4444', animation: 'pulse 1s infinite' }} />
+              REC
+            </div>
+          )}
           {controls.editorMode && (
             <EditorMode
               shapes={editorShapes}
-              onShapesChange={setEditorShapes}
+              onShapesChange={handleShapesChange}
               selectedShapeId={selectedShapeId}
               onSelectShape={setSelectedShapeId}
               canvasWidth={canvasInfo.width}
               canvasHeight={canvasInfo.height}
               lang={lang}
+              multiSelectedIds={multiSelectedIds}
+              onMultiSelectChange={setMultiSelectedIds}
             />
           )}
+          <LightEditor
+            lights={lights}
+            onLightsChange={setLights}
+            canvasWidth={canvasInfo.width}
+            canvasHeight={canvasInfo.height}
+            visible={controls.lightCount > 0}
+          />
         </div>
       </ResizableWindow>
     </>

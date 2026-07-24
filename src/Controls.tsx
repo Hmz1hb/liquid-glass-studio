@@ -262,9 +262,9 @@ export const useLevaControls = ({
         mergeRate: {
           label: lang['editor.mergeRate'],
           min: 0,
-          max: 0.3,
+          max: 0.5,
           step: 0.01,
-          value: 0.05,
+          value: 0.15,
         },
         showShape1: {
           label: lang['editor.showShape1'],
@@ -318,6 +318,17 @@ export const useLevaControls = ({
           step: 0.01,
           value: 10,
         },
+        flowEnabled: { value: false, label: 'Liquid Flow' },
+        flowSpeed: { value: 0.5, min: 0.1, max: 2, step: 0.1, label: 'Flow Speed' },
+        flowScale: { value: 3, min: 1, max: 10, step: 0.5, label: 'Flow Scale' },
+        flowIntensity: { value: 0.3, min: 0, max: 1, step: 0.05, label: 'Flow Intensity' },
+        pulseEnabled: { value: false, label: 'Breathing' },
+        pulseAmplitude: { value: 0.03, min: 0, max: 0.2, step: 0.005, label: 'Pulse Amplitude' },
+        pulseFrequency: { value: 1, min: 0.1, max: 5, step: 0.1, label: 'Pulse Speed' },
+        physicsEnabled: { value: false, label: 'Physics' },
+        physicsGravity: { value: 0, min: -500, max: 500, step: 10, label: 'Gravity' },
+        physicsDamping: { value: 0.98, min: 0.8, max: 1, step: 0.005, label: 'Damping' },
+        physicsStiffness: { value: 0.02, min: 0.001, max: 0.1, step: 0.005, label: 'Spring Stiffness' },
       }, {
         collapsed: true
       }),
@@ -349,6 +360,47 @@ export const useLevaControls = ({
         },
       }, {
         collapsed: true
+      }),
+      ['Material']: folder({
+        roughness: { value: 0, min: 0, max: 1, step: 0.01, label: 'Roughness' },
+        reflectionIntensity: { value: 0, min: 0, max: 1, step: 0.05, label: 'Reflection' },
+        dofIntensity: { value: 0, min: 0, max: 1, step: 0.05, label: 'Depth of Field' },
+        frostedEdge: { value: 0, min: 0, max: 1, step: 0.05, label: 'Frosted Edge' },
+        sellmeierEnabled: { value: false, label: 'Sellmeier Dispersion' },
+        sellmeierPreset: { value: 'crown', options: ['crown', 'flint', 'diamond', 'water', 'custom'], label: 'Glass Type' },
+        multiBounce: { value: false, label: 'Multi-Bounce' },
+      }, {
+        collapsed: true,
+      }),
+      ['Surface Detail']: folder({
+        smudgeEnabled: { value: false, label: 'Fingerprints' },
+        smudgeIntensity: { value: 0.3, min: 0, max: 1, step: 0.05, label: 'Smudge Intensity' },
+        scratchEnabled: { value: false, label: 'Scratches' },
+        scratchDensity: { value: 5, min: 1, max: 20, step: 0.5, label: 'Scratch Density' },
+        scratchDepth: { value: 0.3, min: 0, max: 1, step: 0.05, label: 'Scratch Depth' },
+        scratchAngle: { value: 30, min: -90, max: 90, step: 1, label: 'Scratch Angle' },
+        bubbleEnabled: { value: false, label: 'Bubbles' },
+        bubbleCount: { value: 5, min: 1, max: 20, step: 1, label: 'Bubble Count' },
+        bubbleSize: { value: 3, min: 1, max: 10, step: 0.5, label: 'Bubble Size' },
+        dustEnabled: { value: false, label: 'Dust' },
+        dustDensity: { value: 3, min: 1, max: 10, step: 0.5, label: 'Dust Density' },
+        dustBrightness: { value: 0.5, min: 0, max: 1, step: 0.05, label: 'Dust Brightness' },
+      }, {
+        collapsed: true,
+      }),
+      ['Lighting']: folder({
+        lightCount: { value: 1, min: 0, max: 3, step: 1, label: 'Light Count' },
+        specularPower: { value: 0.08, min: 0.01, max: 1.0, step: 0.01, label: 'Specular Roughness' },
+        specularIntensity: { value: 1.2, min: 0, max: 2, step: 0.05, label: 'Specular Intensity' },
+        causticsEnabled: { value: false, label: 'Caustics' },
+        causticsScale: { value: 8, min: 1, max: 20, step: 0.5, label: 'Caustics Scale' },
+        causticsIntensity: { value: 0.5, min: 0, max: 2, step: 0.05, label: 'Caustics Intensity' },
+        bevelWidth: { value: 0, min: 0, max: 20, step: 0.5, label: 'Bevel Width' },
+        edgeGlowIntensity: { value: 0, min: 0, max: 2, step: 0.05, label: 'Edge Glow' },
+        edgeGlowColor: { value: { r: 100, g: 160, b: 255 }, label: 'Edge Glow Color' },
+        colorBleedIntensity: { value: 0, min: 0, max: 1, step: 0.05, label: 'Color Bleeding' },
+      }, {
+        collapsed: true,
       }),
       ['debugSettings']: folder({
         useWebGPU: {

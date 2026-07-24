@@ -42,6 +42,55 @@ uniform int u_hdrEnabled;
 uniform float u_exposure;
 uniform int u_toneMappingType;
 uniform float u_bloom;
+uniform float u_time;
+
+uniform vec4 u_lights[3];       // x, y, intensity, radius per light
+uniform vec4 u_lightColors[3];  // r, g, b, unused per light
+uniform int u_lightCount;       // 0-3
+uniform float u_specularPower;  // GGX roughness (0.01-1.0)
+uniform float u_specularIntensity; // specular brightness (0-2)
+uniform int u_causticsEnabled;  // 0 or 1
+uniform float u_causticsScale;  // pattern scale (1-20)
+uniform float u_causticsIntensity; // brightness (0-2)
+uniform float u_bevelWidth;     // edge bevel width (0-20)
+uniform float u_edgeGlowIntensity; // edge glow (0-2)
+uniform vec3 u_edgeGlowColor;  // edge glow color
+uniform float u_colorBleedIntensity; // how much glass tints nearby bg (0-1)
+
+// Phase 3: Material Realism
+uniform float u_roughness;           // surface roughness 0-1
+uniform float u_reflectionIntensity; // environment reflection strength 0-1
+uniform int u_glassOnGlass;          // 0=merge, 1=layered
+uniform float u_dofIntensity;        // depth-of-field blur intensity 0-1
+uniform float u_frostedEdge;         // edge roughness gradient 0-1
+uniform int u_sellmeierEnabled;      // use Sellmeier dispersion
+uniform vec3 u_sellmeierB;           // Sellmeier B coefficients
+uniform vec3 u_sellmeierC;           // Sellmeier C coefficients
+uniform int u_multiBounce;           // 0=single, 1=multi-bounce refraction
+
+// Phase 4: Surface Detail
+uniform int u_smudgeEnabled;
+uniform float u_smudgeIntensity;
+uniform int u_scratchEnabled;
+uniform float u_scratchDensity;
+uniform float u_scratchDepth;
+uniform float u_scratchAngle;
+uniform int u_bubbleEnabled;
+uniform int u_bubbleCount;
+uniform float u_bubbleSeed;
+uniform float u_bubbleSize;
+uniform int u_dustEnabled;
+uniform float u_dustDensity;
+uniform float u_dustBrightness;
+
+// Phase 5: Motion & Polish
+uniform int u_flowEnabled;
+uniform float u_flowSpeed;
+uniform float u_flowScale;
+uniform float u_flowIntensity;
+uniform int u_pulseEnabled;
+uniform float u_pulseAmplitude;
+uniform float u_pulseFrequency;
 
 uniform sampler2D u_uiContent;
 uniform int u_uiContentEnabled;
@@ -168,7 +217,47 @@ float sdHexagon(vec2 p, float r) {
   return length(p) * sign(p.y);
 }
 
-// Dispatch SDF by shape type: 0=rect, 1=circle, 2=triangle, 3=star, 4=hexagon
+// SDF for pill/capsule shape
+float sdPill(vec2 p, float w, float h) {
+  p.y -= clamp(p.y, -h * 0.5, h * 0.5);
+  return length(p) - w * 0.5;
+}
+
+// SDF for cross/plus shape
+float sdCross(vec2 p, vec2 b, float r) {
+  p = abs(p);
+  p = (p.y > p.x) ? p.yx : p.xy;
+  vec2 q = p - b;
+  float k = max(q.y, q.x);
+  vec2 w;
+  if (k > 0.0) {
+    w = max(q, 0.0);
+  } else {
+    w = vec2(b.y - p.x, -k);
+  }
+  return sign(k) * length(w) - r;
+}
+
+// SDF for heart shape
+float sdHeart(vec2 p, float r) {
+  p = p / r;
+  p.x = abs(p.x);
+  if (p.y + p.x > 1.0) {
+    return (sqrt(dot(p - vec2(0.25, 0.75), p - vec2(0.25, 0.75))) - sqrt(2.0) / 4.0) * r;
+  }
+  return (sqrt(min(dot(p - vec2(0.0, 1.0), p - vec2(0.0, 1.0)),
+                    dot(p - 0.5 * max(p.x + p.y, 0.0), p - 0.5 * max(p.x + p.y, 0.0)))) *
+          sign(p.x - p.y)) * r;
+}
+
+// 2D rotation helper
+vec2 rotate2D(vec2 p, float angle) {
+  float c = cos(angle);
+  float s = sin(angle);
+  return vec2(c * p.x - s * p.y, s * p.x + c * p.y);
+}
+
+// Dispatch SDF by shape type: 0=rect, 1=circle, 2=triangle, 3=star, 4=hexagon, 5=pill, 6=cross, 7=heart
 float shapeSDF(vec2 pn, float shapeW, float shapeH, float shapeR, float shapeN, int shapeType) {
   float rY = u_resolution.y;
   if (shapeType == 1) {
@@ -186,6 +275,21 @@ float shapeSDF(vec2 pn, float shapeW, float shapeH, float shapeR, float shapeN, 
     // Hexagon
     float s = min(shapeW, shapeH) * u_dpr * 0.5 / rY;
     return sdHexagon(pn, s);
+  } else if (shapeType == 5) {
+    // Pill/capsule
+    float w = shapeW * u_dpr / rY;
+    float h = shapeH * u_dpr / rY;
+    return sdPill(pn, w, h);
+  } else if (shapeType == 6) {
+    // Cross
+    float w = shapeW * u_dpr * 0.5 / rY;
+    float h = shapeH * u_dpr * 0.5 / rY;
+    float armW = min(w, h) * 0.35;
+    return sdCross(pn, vec2(w, armW), shapeR * u_dpr * 0.01 / rY);
+  } else if (shapeType == 7) {
+    // Heart
+    float s = min(shapeW, shapeH) * u_dpr * 0.5 / rY;
+    return sdHeart(vec2(pn.x, -pn.y), s);
   } else {
     // Rectangle (default)
     return roundedRectSDF(pn, vec2(0.0), shapeW / rY, shapeH / rY, shapeR / rY, shapeN);
@@ -206,7 +310,17 @@ float mainSDF(vec2 p1, vec2 p2, vec2 p) {
       float shapeR = u_shapeParams[i].x;
       float shapeN = u_shapeParams[i].y;
       int shapeType = int(u_shapeParams[i].z);
+      float shapeRotation = u_shapeParams[i].w;
       vec2 pn = (-shapeCenter) / u_resolution.y + p / u_resolution.y;
+      // Apply rotation around shape center
+      if (abs(shapeRotation) > 0.001) {
+        pn = rotate2D(pn, shapeRotation);
+      }
+      // Phase 5: Breathing pulse animation
+      if (u_pulseEnabled == 1) {
+        float pulseScale = 1.0 + u_pulseAmplitude * sin(u_time * u_pulseFrequency + float(i) * 1.5);
+        pn = pn / pulseScale;
+      }
       float dd = shapeSDF(pn, shapeW, shapeH, shapeR, shapeN, shapeType);
       if (!hasShape) {
         result = dd;
@@ -443,6 +557,180 @@ vec4 getTextureDispersion(
   float blurR = texture(tex2, v_uv + offset * (1.0 - (N_R - 1.0) * factor)).r;
   float blurG = texture(tex2, v_uv + offset * (1.0 - (N_G - 1.0) * factor)).g;
   float blurB = texture(tex2, v_uv + offset * (1.0 - (N_B - 1.0) * factor)).b;
+
+  pixel.r = mix(bgR, blurR, mixRate);
+  pixel.g = mix(bgG, blurG, mixRate);
+  pixel.b = mix(bgB, blurB, mixRate);
+
+  return pixel;
+}
+
+// GGX/Trowbridge-Reitz normal distribution
+float distributionGGX(vec3 N, vec3 H, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
+    float num = a2;
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = 3.14159265 * denom * denom;
+    return num / max(denom, 0.0001);
+}
+
+// Schlick approximation for Fresnel
+vec3 fresnelSchlick(float cosTheta, vec3 F0) {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+// Simple voronoi for caustics
+float voronoi(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    float minDist = 1.0;
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            vec2 neighbor = vec2(float(x), float(y));
+            vec2 point = vec2(
+                fract(sin(dot(i + neighbor, vec2(127.1, 311.7))) * 43758.5453),
+                fract(sin(dot(i + neighbor, vec2(269.5, 183.3))) * 43758.5453)
+            );
+            point = 0.5 + 0.5 * sin(u_time * 0.5 + 6.2831 * point);
+            vec2 diff = neighbor + point - f;
+            float dist = length(diff);
+            minDist = min(minDist, dist);
+        }
+    }
+    return minDist;
+}
+
+// Compute specular for a single light
+vec3 computeSpecular(vec3 normal, vec2 fragPos, vec2 lightPos, float lightIntensity, vec3 lightColor, float roughness) {
+    vec3 N = normalize(normal);
+    vec3 V = vec3(0.0, 0.0, 1.0); // view from front
+    vec2 lightDir2D = normalize(lightPos - fragPos);
+    vec3 L = normalize(vec3(lightDir2D, 0.5));
+    vec3 H = normalize(V + L);
+
+    float NDF = distributionGGX(N, H, roughness);
+    vec3 F = fresnelSchlick(max(dot(H, V), 0.0), vec3(0.04));
+
+    float NdotL = max(dot(N, L), 0.0);
+    vec3 spec = NDF * F * NdotL * lightColor * lightIntensity;
+    return spec;
+}
+
+// Compute caustics pattern
+float computeCaustics(vec2 uv, float scale, float time) {
+    float v1 = voronoi(uv * scale);
+    float v2 = voronoi(uv * scale * 1.5 + vec2(100.0));
+    float caustic = pow(1.0 - v1, 3.0) + pow(1.0 - v2, 3.0) * 0.5;
+    return caustic;
+}
+
+// === Phase 4: Surface Imperfection Noise Functions ===
+
+vec3 mod289_imp(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec2 mod289_imp2(vec2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec3 permute_imp(vec3 x) { return mod289_imp(((x * 34.0) + 10.0) * x); }
+
+float snoise_imp(vec2 v) {
+    const vec4 C = vec4(0.211324865405187, 0.366025403784439,
+                        -0.577350269189626, 0.024390243902439);
+    vec2 i = floor(v + dot(v, C.yy));
+    vec2 x0 = v - i + dot(i, C.xx);
+    vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+    vec4 x12 = x0.xyxy + C.xxzz;
+    x12.xy -= i1;
+    i = mod289_imp2(i);
+    vec3 p = permute_imp(permute_imp(i.y + vec3(0.0, i1.y, 1.0)) + i.x + vec3(0.0, i1.x, 1.0));
+    vec3 m = max(0.5 - vec3(dot(x0, x0), dot(x12.xy, x12.xy), dot(x12.zw, x12.zw)), 0.0);
+    m = m * m;
+    m = m * m;
+    vec3 x_n = 2.0 * fract(p * C.www) - 1.0;
+    vec3 h = abs(x_n) - 0.5;
+    vec3 ox = floor(x_n + 0.5);
+    vec3 a0 = x_n - ox;
+    m *= 1.79284291400159 - 0.85373472095314 * (a0 * a0 + h * h);
+    vec3 g;
+    g.x = a0.x * x0.x + h.x * x0.y;
+    g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+    return 130.0 * dot(m, g);
+}
+
+float fbm_imp(vec2 p, int octaves) {
+    float value = 0.0;
+    float amplitude = 0.5;
+    float frequency = 1.0;
+    for (int i = 0; i < 6; i++) {
+        if (i >= octaves) break;
+        value += amplitude * snoise_imp(p * frequency);
+        frequency *= 2.0;
+        amplitude *= 0.5;
+    }
+    return value;
+}
+
+float hash21_imp(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+vec2 hash22_imp(vec2 p) {
+    return vec2(hash21_imp(p), hash21_imp(p + 127.1));
+}
+
+// === Phase 3: Material Realism Helper Functions ===
+
+// Sellmeier equation: n²(λ) = 1 + B₁λ²/(λ²-C₁) + B₂λ²/(λ²-C₂) + B₃λ²/(λ²-C₃)
+float sellmeierIOR(float wavelength, vec3 B, vec3 C) {
+    float l2 = wavelength * wavelength;
+    float n2 = 1.0
+        + B.x * l2 / (l2 - C.x)
+        + B.y * l2 / (l2 - C.y)
+        + B.z * l2 / (l2 - C.z);
+    return sqrt(max(n2, 1.0));
+}
+
+// Environment reflection sampling
+vec3 sampleReflection(vec2 uv, vec2 normal, float intensity) {
+    vec2 reflectUV = uv - normal * 0.15 * intensity;
+    reflectUV = clamp(reflectUV, 0.0, 1.0);
+    return texture(u_bg, reflectUV).rgb;
+}
+
+// Depth-based blur factor for depth-of-field
+float getDepthBlur(float sdfDist, float dofIntensity) {
+    // Thicker glass = more blur
+    float thickness = clamp(-sdfDist * u_resolution.y * 0.1, 0.0, 1.0);
+    return mix(1.0, thickness, dofIntensity);
+}
+
+// Frosted edge gradient - more rough near edges, clear in center
+float getFrostedEdge(float sdfDist, float frostedEdge) {
+    float edgeDist = clamp(-sdfDist * u_resolution.y * 0.5, 0.0, 1.0);
+    return mix(1.0, 1.0 - edgeDist, frostedEdge);
+}
+
+// Sellmeier-based texture dispersion (replaces fixed N_R/N_G/N_B when enabled)
+vec4 getTextureDispersionSellmeier(
+  sampler2D tex1,
+  sampler2D tex2,
+  float mixRate,
+  vec2 offset,
+  float ior_r,
+  float ior_g,
+  float ior_b
+) {
+  vec4 pixel = vec4(1.0);
+
+  float bgR = texture(tex1, v_uv + offset * (1.0 - (ior_r / ior_g - 1.0))).r;
+  float bgG = texture(tex1, v_uv + offset).g;
+  float bgB = texture(tex1, v_uv + offset * (1.0 - (ior_b / ior_g - 1.0))).b;
+
+  float blurR = texture(tex2, v_uv + offset * (1.0 - (ior_r / ior_g - 1.0))).r;
+  float blurG = texture(tex2, v_uv + offset).g;
+  float blurB = texture(tex2, v_uv + offset * (1.0 - (ior_b / ior_g - 1.0))).b;
 
   pixel.r = mix(bgR, blurR, mixRate);
   pixel.g = mix(bgG, blurG, mixRate);
@@ -782,22 +1070,106 @@ void main() {
         // u_refThickness - pow(u_refThickness * u_refThickness - nmerged * nmerged, 0.5);
         // calculate parameters
         vec2 normal = getNormal(p1, p2, gl_FragCoord.xy);
-        vec4 blurredPixel = getTextureDispersion(
-          u_bg,
-          u_blurredBg,
-          u_blurEdge > 0
-            ? 1.0
-            : edgeH,
-          -normal *
+
+        // Phase 4: Surface Imperfections (normal perturbation)
+        // Fingerprint smudges
+        if (u_smudgeEnabled == 1 && nmerged > 0.0) {
+            vec2 smudgeUV = gl_FragCoord.xy / u_resolution * 8.0;
+            float smudge1 = fbm_imp(smudgeUV * 3.0, 4);
+            float smudge2 = fbm_imp(smudgeUV * 5.0 + 100.0, 3);
+            float ridges = sin(smudge1 * 20.0 + smudgeUV.x * 10.0) * 0.5 + 0.5;
+            vec2 smudgePerturb = vec2(
+                fbm_imp(smudgeUV + vec2(0.1, 0.0), 3) - fbm_imp(smudgeUV - vec2(0.1, 0.0), 3),
+                fbm_imp(smudgeUV + vec2(0.0, 0.1), 3) - fbm_imp(smudgeUV - vec2(0.0, 0.1), 3)
+            ) * ridges;
+            normal += smudgePerturb * u_smudgeIntensity * 0.5;
+        }
+
+        // Surface scratches
+        if (u_scratchEnabled == 1 && nmerged > 0.0) {
+            vec2 scratchUV = gl_FragCoord.xy / u_resolution * u_scratchDensity;
+            float angle = u_scratchAngle;
+            vec2 rotUV = vec2(
+                scratchUV.x * cos(angle) - scratchUV.y * sin(angle),
+                scratchUV.x * sin(angle) + scratchUV.y * cos(angle)
+            );
+            float scratch = abs(sin(rotUV.x * 50.0 + snoise_imp(rotUV * 10.0) * 5.0));
+            scratch = pow(scratch, 20.0);
+            float scratchMask = step(0.7, hash21_imp(floor(rotUV * 3.0)));
+            normal += vec2(scratch * scratchMask * u_scratchDepth * 0.3, 0.0);
+        }
+
+        vec2 refractionOffset = -normal *
             edgeFactor *
             0.05 *
             u_dpr *
             vec2(
               u_resolution.y / (u_resolution1x.x * u_dpr), /* resolution independent */
               1.0
-            ),
-          u_refDispersion
-        );
+            );
+
+        // Phase 5: Liquid flow distortion
+        if (u_flowEnabled == 1 && nmerged > 0.0) {
+            vec2 flowUV = v_uv * u_flowScale;
+            float flow1 = snoise_imp(flowUV + vec2(u_time * u_flowSpeed * 0.3, 0.0));
+            float flow2 = snoise_imp(flowUV * 1.5 + vec2(0.0, u_time * u_flowSpeed * 0.2) + 50.0);
+            refractionOffset += vec2(flow1, flow2) * u_flowIntensity * 0.01;
+        }
+
+        float blurMixRate = u_blurEdge > 0 ? 1.0 : edgeH;
+
+        vec4 blurredPixel;
+        if (u_sellmeierEnabled == 1) {
+          // Sellmeier dispersion: wavelengths in micrometers R=0.65, G=0.55, B=0.45
+          float ior_r = sellmeierIOR(0.65, u_sellmeierB, u_sellmeierC);
+          float ior_g = sellmeierIOR(0.55, u_sellmeierB, u_sellmeierC);
+          float ior_b = sellmeierIOR(0.45, u_sellmeierB, u_sellmeierC);
+          blurredPixel = getTextureDispersionSellmeier(
+            u_bg,
+            u_blurredBg,
+            blurMixRate,
+            refractionOffset,
+            ior_r,
+            ior_g,
+            ior_b
+          );
+        } else {
+          // Original fixed dispersion
+          blurredPixel = getTextureDispersion(
+            u_bg,
+            u_blurredBg,
+            blurMixRate,
+            refractionOffset,
+            u_refDispersion
+          );
+        }
+
+        // Multi-bounce refraction: apply a second refraction pass
+        if (u_multiBounce == 1) {
+          vec2 secondOffset = refractionOffset * 0.5;
+          vec4 secondBounce = getTextureDispersion(
+            u_bg,
+            u_blurredBg,
+            blurMixRate,
+            refractionOffset + secondOffset,
+            u_refDispersion * 0.7
+          );
+          blurredPixel.rgb = mix(blurredPixel.rgb, secondBounce.rgb, 0.3);
+        }
+
+        // Depth-of-field: mix in extra blur based on glass thickness
+        if (u_dofIntensity > 0.0 && merged < 0.0) {
+          float depthBlur = getDepthBlur(merged, u_dofIntensity);
+          vec3 dofBlurred = texture(u_blurredBg, v_uv + refractionOffset).rgb;
+          blurredPixel.rgb = mix(blurredPixel.rgb, dofBlurred, (1.0 - depthBlur) * 0.3);
+        }
+
+        // Frosted edge: increase roughness/blur near glass edges
+        if (u_frostedEdge > 0.0) {
+          float frosted = getFrostedEdge(merged, u_frostedEdge);
+          vec3 frostedBlur = texture(u_blurredBg, v_uv + refractionOffset).rgb;
+          blurredPixel.rgb = mix(blurredPixel.rgb, frostedBlur, (1.0 - frosted) * 0.5);
+        }
 
         // basic tint
         outColor = mix(blurredPixel, vec4(u_tint.r, u_tint.g, u_tint.b, 1.0), u_tint.a * 0.8);
@@ -825,6 +1197,14 @@ void main() {
           vec4(LCH_TO_SRGB(fresnelTintLCH), 1.0),
           fresnelFactor * u_refFresnelFactor * 0.7 * length(normal)
         );
+
+        // Environment reflections (Phase 3)
+        if (u_reflectionIntensity > 0.0) {
+          vec3 reflColor = sampleReflection(v_uv, normal, u_reflectionIntensity);
+          // Blend reflection with fresnel - more reflection at glancing angles
+          float reflFresnel = pow(1.0 - max(dot(normalize(vec3(normal, 1.0)), vec3(0.0, 0.0, 1.0)), 0.0), 3.0);
+          outColor.rgb = mix(outColor.rgb, reflColor, reflFresnel * u_reflectionIntensity * 0.5);
+        }
 
         // add glare
         float glareGeoFactor = clamp(
@@ -867,6 +1247,39 @@ void main() {
           glareAngleFactor * glareGeoFactor * length(normal)
         );
       }
+
+      // Phase 4: Air bubbles
+      if (u_bubbleEnabled == 1 && nmerged > 0.0) {
+          for (int bi = 0; bi < 20; bi++) {
+              if (bi >= u_bubbleCount) break;
+              vec2 bubbleCenter = hash22_imp(vec2(float(bi) + u_bubbleSeed, u_bubbleSeed + 0.5));
+              vec2 bubblePos = (bubbleCenter - 0.5) * 0.5;
+              float bubbleR = u_bubbleSize * (0.5 + hash21_imp(vec2(float(bi), 42.0)) * 0.5) / u_resolution.y;
+              vec2 pBubble = gl_FragCoord.xy / u_resolution - 0.5 - bubblePos;
+              float bubbleDist = length(pBubble) - bubbleR;
+              if (bubbleDist < 0.0) {
+                  vec2 bubbleN = normalize(pBubble);
+                  vec2 invRefract = bubbleN * 0.02;
+                  vec3 bubbleColor = texture(u_blurredBg, v_uv + invRefract).rgb;
+                  float bubbleFresnel = pow(1.0 - abs(dot(bubbleN, vec2(0.0, 1.0))), 3.0);
+                  outColor.rgb = mix(outColor.rgb, bubbleColor + vec3(bubbleFresnel * 0.3), smoothstep(0.0, -bubbleR * 0.5, bubbleDist));
+              }
+          }
+      }
+
+      // Phase 4: Dust particles
+      if (u_dustEnabled == 1 && nmerged > 0.0) {
+          vec2 dustUV = gl_FragCoord.xy / u_resolution * u_dustDensity * 100.0;
+          vec2 dustCell = floor(dustUV);
+          float dustVal = hash21_imp(dustCell);
+          if (dustVal > 0.95) {
+              vec2 dustPos = hash22_imp(dustCell);
+              float dustDist = length(fract(dustUV) - dustPos);
+              float dustDot = smoothstep(0.05, 0.0, dustDist);
+              outColor.rgb += vec3(dustDot * u_dustBrightness * 0.5);
+          }
+      }
+
     } else {
       outColor = texture(u_bg, v_uv);
     }
@@ -899,6 +1312,55 @@ void main() {
       float pulseMultiplier = 1.0 + u_emissivePulse * 0.3;
       vec3 emissive = u_emissiveColor * u_emissiveIntensity * emissiveFactor * pulseMultiplier;
       outColor.rgb += emissive;
+    }
+
+    // === Phase 2: Lighting Engine ===
+    if (u_lightCount > 0 && merged < 0.0) {
+      float nmerged_lt = -1.0 * (merged * u_resolution1x.y);
+      vec2 normal_lt = getNormal(p1, p2, gl_FragCoord.xy);
+      vec3 normal3D = vec3(normal_lt, sqrt(max(0.0, 1.0 - dot(normal_lt, normal_lt))));
+      vec2 fragPos2D = gl_FragCoord.xy / u_resolution;
+
+      vec3 totalSpecular = vec3(0.0);
+      for (int i = 0; i < 3; i++) {
+        if (i >= u_lightCount) break;
+        vec2 lightPos = u_lights[i].xy / u_resolution;
+        float lightIntensity = u_lights[i].z;
+        float lightRadius = u_lights[i].w;
+        vec3 lightColor = u_lightColors[i].rgb;
+
+        float dist = length(fragPos2D - lightPos);
+        float attenuation = 1.0 / (1.0 + dist * dist * 10.0 / max(lightRadius * lightRadius, 0.01));
+
+        // Specular
+        totalSpecular += computeSpecular(normal3D, fragPos2D, lightPos, lightIntensity, lightColor, u_specularPower) * attenuation * u_specularIntensity;
+
+        // Caustics (only inside glass)
+        if (u_causticsEnabled == 1 && nmerged_lt > 0.0) {
+          float caustic = computeCaustics(fragPos2D + normal_lt * 0.1, u_causticsScale, u_time);
+          outColor.rgb += caustic * u_causticsIntensity * lightColor * attenuation * 0.3;
+        }
+      }
+      outColor.rgb += totalSpecular;
+
+      // Bevel edge highlight
+      if (u_bevelWidth > 0.0) {
+        float bevelZone = smoothstep(0.0, u_bevelWidth / u_resolution.y, abs(merged));
+        float bevelHighlight = (1.0 - bevelZone) * 0.5;
+        for (int i = 0; i < 3; i++) {
+          if (i >= u_lightCount) break;
+          vec2 lightPos = u_lights[i].xy / u_resolution;
+          vec2 lightDir = normalize(lightPos - fragPos2D);
+          float bevelCatch = max(dot(normal_lt, lightDir), 0.0);
+          outColor.rgb += u_lightColors[i].rgb * bevelHighlight * bevelCatch * u_lights[i].z;
+        }
+      }
+
+      // Edge glow (total internal reflection simulation)
+      if (u_edgeGlowIntensity > 0.0) {
+        float edgeZone = smoothstep(2.0 / u_resolution.y, 0.0, abs(merged));
+        outColor.rgb += u_edgeGlowColor * edgeZone * u_edgeGlowIntensity;
+      }
     }
 
     // smooth

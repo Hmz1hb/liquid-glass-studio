@@ -191,3 +191,62 @@
     cursor: pointer;
   }
 }
+
+.rotateHandle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: rgb(80, 140, 255);
+  border: 1.5px solid white;
+  pointer-events: all;
+  cursor: grab;
+  z-index: 3;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+
+  &:hover {
+    background: rgb(60, 120, 255);
+    transform: scale(1.2);
+  }
+
+  &:active {
+    cursor: grabbing;
+  }
+}
+
+.rotateLine {
+  position: absolute;
+  width: 1px;
+  background: rgba(80, 140, 255, 0.5);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.layerActions {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.layerBtn {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  padding: 1px;
+  font-size: 10px;
+  line-height: 1;
+  border-radius: 2px;
+  display: flex;
+  align-items: center;
+
+  &:hover {
+    color: white;
+    background: rgba(255, 255, 255, 0.1);
+  }
+}
+
+.multiSelectHighlight {
+  border-color: rgba(255, 200, 80, 0.8) !important;
+  background: rgba(255, 200, 80, 0.05);
+}

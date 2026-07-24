@@ -19,9 +19,13 @@ struct Uniforms {
     u_textEnabled: i32,
     u_textScale: f32,
     u_shapeCount: i32,
-    _pad1: i32,
+    u_lightCount: i32,
+    u_colorBleedIntensity: f32,
+    _pad1: f32,
     u_shapes: array<vec4<f32>, 8>,
     u_shapeParams: array<vec4<f32>, 8>,
+    u_lights: array<vec4<f32>, 3>,
+    u_lightColors: array<vec4<f32>, 3>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -121,6 +125,43 @@ fn sdHexagon(p_in: vec2<f32>, r: f32) -> f32 {
     return length(p) * sign(p.y);
 }
 
+fn sdPill(p_in: vec2<f32>, w: f32, h: f32) -> f32 {
+    var p = p_in;
+    p.y = p.y - clamp(p.y, -h * 0.5, h * 0.5);
+    return length(p) - w * 0.5;
+}
+
+fn sdCross(p_in: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
+    var p = abs(p_in);
+    if (p.y > p.x) { p = p.yx; }
+    let q = p - b;
+    let k = max(q.y, q.x);
+    var w: vec2<f32>;
+    if (k > 0.0) {
+        w = max(q, vec2<f32>(0.0));
+    } else {
+        w = vec2<f32>(b.y - p.x, -k);
+    }
+    return sign(k) * length(w) - r;
+}
+
+fn sdHeart(p_in: vec2<f32>, r: f32) -> f32 {
+    var p = p_in / r;
+    p.x = abs(p.x);
+    if (p.y + p.x > 1.0) {
+        return (sqrt(dot(p - vec2<f32>(0.25, 0.75), p - vec2<f32>(0.25, 0.75))) - sqrt(2.0) / 4.0) * r;
+    }
+    return (sqrt(min(dot(p - vec2<f32>(0.0, 1.0), p - vec2<f32>(0.0, 1.0)),
+                      dot(p - 0.5 * max(p.x + p.y, 0.0), p - 0.5 * max(p.x + p.y, 0.0)))) *
+            sign(p.x - p.y)) * r;
+}
+
+fn rotate2D(p: vec2<f32>, angle: f32) -> vec2<f32> {
+    let c = cos(angle);
+    let s = sin(angle);
+    return vec2<f32>(c * p.x - s * p.y, s * p.x + c * p.y);
+}
+
 fn shapeSDF(pn: vec2<f32>, shapeW: f32, shapeH: f32, shapeR: f32, shapeN: f32, shapeType: i32) -> f32 {
     let rY = u.u_resolution.y;
     if (shapeType == 1) {
@@ -134,6 +175,18 @@ fn shapeSDF(pn: vec2<f32>, shapeW: f32, shapeH: f32, shapeR: f32, shapeN: f32, s
     } else if (shapeType == 4) {
         let s = min(shapeW, shapeH) * u.u_dpr * 0.5 / rY;
         return sdHexagon(pn, s);
+    } else if (shapeType == 5) {
+        let w = shapeW * u.u_dpr / rY;
+        let h = shapeH * u.u_dpr / rY;
+        return sdPill(pn, w, h);
+    } else if (shapeType == 6) {
+        let w = shapeW * u.u_dpr * 0.5 / rY;
+        let h = shapeH * u.u_dpr * 0.5 / rY;
+        let armW = min(w, h) * 0.35;
+        return sdCross(pn, vec2<f32>(w, armW), shapeR * u.u_dpr * 0.01 / rY);
+    } else if (shapeType == 7) {
+        let s = min(shapeW, shapeH) * u.u_dpr * 0.5 / rY;
+        return sdHeart(vec2<f32>(pn.x, -pn.y), s);
     } else {
         return roundedRectSDF(pn, vec2<f32>(0.0), shapeW / rY, shapeH / rY, shapeR / rY, shapeN);
     }
@@ -155,7 +208,11 @@ fn mainSDF(p1: vec2<f32>, p2: vec2<f32>, p: vec2<f32>) -> f32 {
             let shapeR = u.u_shapeParams[i].x;
             let shapeN = u.u_shapeParams[i].y;
             let shapeType = i32(u.u_shapeParams[i].z);
-            let pn = (-shapeCenter) / u.u_resolution.y + p / u.u_resolution.y;
+            let shapeRotation = u.u_shapeParams[i].w;
+            var pn = (-shapeCenter) / u.u_resolution.y + p / u.u_resolution.y;
+            if (abs(shapeRotation) > 0.001) {
+                pn = rotate2D(pn, shapeRotation);
+            }
             let dd = shapeSDF(pn, shapeW, shapeH, shapeR, shapeN, shapeType);
             if (!hasShape) {
                 result = dd;
@@ -219,6 +276,7 @@ fn main_frag(@builtin(position) fragCoord: vec4<f32>, @location(0) v_uv: vec2<f3
     // Note: In WebGPU, fragCoord.y is top-down. We flip for consistency with GL.
     let fragXY = vec2<f32>(fragCoord.x, u.u_resolution.y - fragCoord.y);
 
+
     if (u.u_bgType <= 0) {
         bgColor = vec3<f32>(1.0 - chessboard(fragXY / u.u_dpr, 20.0, 2) / 4.0);
     } else if (u.u_bgType <= 1) {
@@ -247,5 +305,22 @@ fn main_frag(@builtin(position) fragCoord: vec4<f32>, @location(0) v_uv: vec2<f3
 
     let shadow = exp(-1.0 / u.u_shadowExpand * abs(merged) * u_resolution1x.y) * 0.6 * u.u_shadowFactor;
 
-    return vec4<f32>(bgColor - vec3<f32>(shadow), 1.0);
+    bgColor = bgColor - vec3<f32>(shadow);
+
+    // Light color bleeding
+    if (u.u_lightCount > 0 && u.u_colorBleedIntensity > 0.0) {
+        for (var li: i32 = 0; li < 3; li++) {
+            if (li >= u.u_lightCount) { break; }
+            let lightPos = u.u_lights[li].xy;
+            let lightIntensity = u.u_lights[li].z;
+            let lightRadius = u.u_lights[li].w;
+            let lightColor = u.u_lightColors[li].rgb;
+
+            let dist = length(fragXY - lightPos) / u.u_resolution.y;
+            let influence = exp(-dist * 3.0 / max(lightRadius, 0.01)) * lightIntensity * u.u_colorBleedIntensity;
+            bgColor = bgColor + lightColor * influence * 0.15;
+        }
+    }
+
+    return vec4<f32>(bgColor, 1.0);
 }

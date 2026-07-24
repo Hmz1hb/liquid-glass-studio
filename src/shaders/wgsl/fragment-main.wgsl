@@ -42,6 +42,59 @@ struct MainUniforms {
     u_textEnabled: i32,
     u_textScale: f32,
     STEP: i32,
+    u_time: f32,
+    u_lightCount: i32,
+    u_specularPower: f32,
+    u_specularIntensity: f32,
+    u_causticsEnabled: i32,
+    u_causticsScale: f32,
+    u_causticsIntensity: f32,
+    u_bevelWidth: f32,
+    u_edgeGlowIntensity: f32,
+    _pad_lighting: f32,
+    _pad_lighting2: f32,
+    _pad_lighting3: f32,
+    u_edgeGlowColor: vec3<f32>,
+    u_colorBleedIntensity: f32,
+    u_lights: array<vec4<f32>, 3>,
+    u_lightColors: array<vec4<f32>, 3>,
+    // Phase 3: Material Realism
+    u_roughness: f32,
+    u_reflectionIntensity: f32,
+    u_glassOnGlass: i32,
+    u_dofIntensity: f32,
+    u_frostedEdge: f32,
+    u_sellmeierEnabled: i32,
+    u_sellmeierB: vec3<f32>,
+    _pad_sellB: f32,
+    u_sellmeierC: vec3<f32>,
+    _pad_sellC: f32,
+    u_multiBounce: i32,
+    _pad_phase3: i32,
+    // Phase 4: Surface Detail (Imperfections)
+    u_smudgeEnabled: i32,
+    u_smudgeIntensity: f32,
+    u_scratchEnabled: i32,
+    u_scratchDensity: f32,
+    u_scratchDepth: f32,
+    u_scratchAngle: f32,
+    u_bubbleEnabled: i32,
+    u_bubbleCount: i32,
+    u_bubbleSeed: f32,
+    u_bubbleSize: f32,
+    u_dustEnabled: i32,
+    u_dustDensity: f32,
+    u_dustBrightness: f32,
+    _pad_phase4: f32,
+    // Phase 5: Motion & Polish
+    u_flowEnabled: i32,
+    u_flowSpeed: f32,
+    u_flowScale: f32,
+    u_flowIntensity: f32,
+    u_pulseEnabled: i32,
+    u_pulseAmplitude: f32,
+    u_pulseFrequency: f32,
+    _pad_phase5: f32,
 };
 
 @group(0) @binding(0) var<uniform> u: MainUniforms;
@@ -129,6 +182,43 @@ fn sdHexagon(p_in: vec2<f32>, r: f32) -> f32 {
     return length(p) * sign(p.y);
 }
 
+fn sdPill(p_in: vec2<f32>, w: f32, h: f32) -> f32 {
+    var p = p_in;
+    p.y = p.y - clamp(p.y, -h * 0.5, h * 0.5);
+    return length(p) - w * 0.5;
+}
+
+fn sdCross(p_in: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
+    var p = abs(p_in);
+    if (p.y > p.x) { p = p.yx; }
+    let q = p - b;
+    let k = max(q.y, q.x);
+    var w: vec2<f32>;
+    if (k > 0.0) {
+        w = max(q, vec2<f32>(0.0));
+    } else {
+        w = vec2<f32>(b.y - p.x, -k);
+    }
+    return sign(k) * length(w) - r;
+}
+
+fn sdHeart(p_in: vec2<f32>, r: f32) -> f32 {
+    var p = p_in / r;
+    p.x = abs(p.x);
+    if (p.y + p.x > 1.0) {
+        return (sqrt(dot(p - vec2<f32>(0.25, 0.75), p - vec2<f32>(0.25, 0.75))) - sqrt(2.0) / 4.0) * r;
+    }
+    return (sqrt(min(dot(p - vec2<f32>(0.0, 1.0), p - vec2<f32>(0.0, 1.0)),
+                      dot(p - 0.5 * max(p.x + p.y, 0.0), p - 0.5 * max(p.x + p.y, 0.0)))) *
+            sign(p.x - p.y)) * r;
+}
+
+fn rotate2D(p: vec2<f32>, angle: f32) -> vec2<f32> {
+    let c = cos(angle);
+    let s = sin(angle);
+    return vec2<f32>(c * p.x - s * p.y, s * p.x + c * p.y);
+}
+
 fn shapeSDF(pn: vec2<f32>, shapeW: f32, shapeH: f32, shapeR: f32, shapeN: f32, shapeType: i32) -> f32 {
     let rY = u.u_resolution.y;
     if (shapeType == 1) {
@@ -142,6 +232,18 @@ fn shapeSDF(pn: vec2<f32>, shapeW: f32, shapeH: f32, shapeR: f32, shapeN: f32, s
     } else if (shapeType == 4) {
         let s = min(shapeW, shapeH) * u.u_dpr * 0.5 / rY;
         return sdHexagon(pn, s);
+    } else if (shapeType == 5) {
+        let w = shapeW * u.u_dpr / rY;
+        let h = shapeH * u.u_dpr / rY;
+        return sdPill(pn, w, h);
+    } else if (shapeType == 6) {
+        let w = shapeW * u.u_dpr * 0.5 / rY;
+        let h = shapeH * u.u_dpr * 0.5 / rY;
+        let armW = min(w, h) * 0.35;
+        return sdCross(pn, vec2<f32>(w, armW), shapeR * u.u_dpr * 0.01 / rY);
+    } else if (shapeType == 7) {
+        let s = min(shapeW, shapeH) * u.u_dpr * 0.5 / rY;
+        return sdHeart(vec2<f32>(pn.x, -pn.y), s);
     } else {
         return roundedRectSDF(pn, vec2<f32>(0.0), shapeW / rY, shapeH / rY, shapeR / rY, shapeN);
     }
@@ -160,7 +262,16 @@ fn mainSDF(p1: vec2<f32>, p2: vec2<f32>, p: vec2<f32>) -> f32 {
             let shapeR = u.u_shapeParams[i].x;
             let shapeN = u.u_shapeParams[i].y;
             let shapeType = i32(u.u_shapeParams[i].z);
-            let pn = (-shapeCenter) / u.u_resolution.y + p / u.u_resolution.y;
+            let shapeRotation = u.u_shapeParams[i].w;
+            var pn = (-shapeCenter) / u.u_resolution.y + p / u.u_resolution.y;
+            if (abs(shapeRotation) > 0.001) {
+                pn = rotate2D(pn, shapeRotation);
+            }
+            // Phase 5: Breathing pulse animation
+            if (u.u_pulseEnabled == 1) {
+                let pulseScale = 1.0 + u.u_pulseAmplitude * sin(u.u_time * u.u_pulseFrequency + f32(i) * 1.5);
+                pn = pn / pulseScale;
+            }
             let dd = shapeSDF(pn, shapeW, shapeH, shapeR, shapeN, shapeType);
             if (!hasShape) {
                 result = dd;
@@ -356,6 +467,66 @@ fn LCH_TO_SRGB(lch: vec3<f32>) -> vec3<f32> {
     return LAB_TO_SRGB(LCH_TO_LAB(lch));
 }
 
+// ========== Phase 2: Lighting helpers ==========
+
+fn distributionGGX(N: vec3<f32>, H: vec3<f32>, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let NdotH = max(dot(N, H), 0.0);
+    let NdotH2 = NdotH * NdotH;
+    let num = a2;
+    var denom = NdotH2 * (a2 - 1.0) + 1.0;
+    denom = 3.14159265 * denom * denom;
+    return num / max(denom, 0.0001);
+}
+
+fn fresnelSchlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+fn voronoi(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    var minDist = 1.0;
+    for (var x: i32 = -1; x <= 1; x++) {
+        for (var y: i32 = -1; y <= 1; y++) {
+            let neighbor = vec2<f32>(f32(x), f32(y));
+            let cellId = i + neighbor;
+            var point = vec2<f32>(
+                fract(sin(dot(cellId, vec2<f32>(127.1, 311.7))) * 43758.5453),
+                fract(sin(dot(cellId, vec2<f32>(269.5, 183.3))) * 43758.5453)
+            );
+            point = 0.5 + 0.5 * sin(u.u_time * 0.5 + 6.2831 * point);
+            let diff = neighbor + point - f;
+            let dist = length(diff);
+            minDist = min(minDist, dist);
+        }
+    }
+    return minDist;
+}
+
+fn computeSpecular(normal: vec3<f32>, fragPos: vec2<f32>, lightPos: vec2<f32>, lightIntensity: f32, lightColor: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let N = normalize(normal);
+    let V = vec3<f32>(0.0, 0.0, 1.0);
+    let lightDir2D = normalize(lightPos - fragPos);
+    let L = normalize(vec3<f32>(lightDir2D, 0.5));
+    let H = normalize(V + L);
+
+    let NDF = distributionGGX(N, H, roughness);
+    let F = fresnelSchlick(max(dot(H, V), 0.0), vec3<f32>(0.04));
+
+    let NdotL = max(dot(N, L), 0.0);
+    let spec = NDF * F * NdotL * lightColor * lightIntensity;
+    return spec;
+}
+
+fn computeCaustics(uv: vec2<f32>, scale: f32, time: f32) -> f32 {
+    let v1 = voronoi(uv * scale);
+    let v2 = voronoi(uv * scale * 1.5 + vec2<f32>(100.0));
+    let caustic = pow(1.0 - v1, 3.0) + pow(1.0 - v2, 3.0) * 0.5;
+    return caustic;
+}
+
 // ========== Tone mapping ==========
 
 fn ACESFilm(x: vec3<f32>) -> vec3<f32> {
@@ -369,6 +540,81 @@ fn ACESFilm(x: vec3<f32>) -> vec3<f32> {
 
 fn Reinhard(x: vec3<f32>) -> vec3<f32> {
     return x / (1.0 + x);
+}
+
+// ========== Phase 3: Material Realism helpers ==========
+
+fn sellmeierIOR(wavelength: f32, B: vec3<f32>, C: vec3<f32>) -> f32 {
+    let l2 = wavelength * wavelength;
+    let n2 = 1.0
+        + B.x * l2 / (l2 - C.x)
+        + B.y * l2 / (l2 - C.y)
+        + B.z * l2 / (l2 - C.z);
+    return sqrt(max(n2, 1.0));
+}
+
+fn sampleReflection(uv: vec2<f32>, normal: vec2<f32>, intensity: f32) -> vec3<f32> {
+    var reflectUV = uv - normal * 0.15 * intensity;
+    reflectUV = clamp(reflectUV, vec2<f32>(0.0), vec2<f32>(1.0));
+    return textureSample(u_bg, texSampler, reflectUV).rgb;
+}
+
+fn getDepthBlur(sdfDist: f32, dofIntensity: f32) -> f32 {
+    let thickness = clamp(-sdfDist * u.u_resolution.y * 0.1, 0.0, 1.0);
+    return mix(1.0, thickness, dofIntensity);
+}
+
+fn getFrostedEdge(sdfDist: f32, frostedEdge: f32) -> f32 {
+    let edgeDist = clamp(-sdfDist * u.u_resolution.y * 0.5, 0.0, 1.0);
+    return mix(1.0, 1.0 - edgeDist, frostedEdge);
+}
+
+// ========== Phase 4: Noise & Imperfection helpers ==========
+
+fn snoise_imp(v: vec2<f32>) -> f32 {
+    let C = vec4<f32>(0.211324865405187, 0.366025403784439,
+                      -0.577350269189626, 0.024390243902439);
+    let i = floor(v + dot(v, C.yy));
+    let x0 = v - i + dot(i, C.xx);
+    var i1: vec2<f32>;
+    if (x0.x > x0.y) { i1 = vec2<f32>(1.0, 0.0); } else { i1 = vec2<f32>(0.0, 1.0); }
+    var x12 = x0.xyxy + C.xxzz;
+    x12 = vec4<f32>(x12.x - i1.x, x12.y - i1.y, x12.z, x12.w);
+    // Simplified permute
+    let p1 = floor(fract((i.y + vec3<f32>(0.0, i1.y, 1.0)) * 0.024390243902439) * 289.0);
+    let p2 = floor(fract((p1 + i.x + vec3<f32>(0.0, i1.x, 1.0)) * 0.024390243902439) * 289.0);
+    var m = max(vec3<f32>(0.5) - vec3<f32>(dot(x0, x0), dot(x12.xy, x12.xy), dot(x12.zw, x12.zw)), vec3<f32>(0.0));
+    m = m * m * m * m;
+    let x_v = 2.0 * fract(p2 * C.www) - 1.0;
+    let h = abs(x_v) - 0.5;
+    let ox = floor(x_v + 0.5);
+    let a0 = x_v - ox;
+    m = m * (1.79284291400159 - 0.85373472095314 * (a0 * a0 + h * h));
+    let g = vec3<f32>(a0.x * x0.x + h.x * x0.y, a0.y * x12.x + h.y * x12.y, a0.z * x12.z + h.z * x12.w);
+    return 130.0 * dot(m, g);
+}
+
+fn fbm_imp(p: vec2<f32>, octaves: i32) -> f32 {
+    var value = 0.0;
+    var amplitude = 0.5;
+    var frequency = 1.0;
+    for (var i: i32 = 0; i < 6; i++) {
+        if (i >= octaves) { break; }
+        value += amplitude * snoise_imp(p * frequency);
+        frequency *= 2.0;
+        amplitude *= 0.5;
+    }
+    return value;
+}
+
+fn hash21_imp(p_in: vec2<f32>) -> f32 {
+    var p = fract(p_in * vec2<f32>(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+fn hash22_imp(p: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(hash21_imp(p), hash21_imp(p + 127.1));
 }
 
 // ========== Main fragment ==========
@@ -681,10 +927,35 @@ fn main_frag(@builtin(position) fragCoord: vec4<f32>, @location(0) v_uv: vec2<f3
                 // height of glass edge
                 let edgeH = nmerged / u.u_refThickness;
 
-                let normal = getNormal(p1, p2, fragXY);
+                var normal = getNormal(p1, p2, fragXY);
+
+                // Phase 4: Surface Imperfections - Normal perturbation
+                if (u.u_smudgeEnabled == 1 && nmerged > 0.0) {
+                    let smudgeUV = fragXY / u.u_resolution.xy * 8.0;
+                    let smudge1 = fbm_imp(smudgeUV * 3.0, 4);
+                    let ridges = sin(smudge1 * 20.0 + smudgeUV.x * 10.0) * 0.5 + 0.5;
+                    let smudgePerturb = vec2<f32>(
+                        fbm_imp(smudgeUV + vec2<f32>(0.1, 0.0), 3) - fbm_imp(smudgeUV - vec2<f32>(0.1, 0.0), 3),
+                        fbm_imp(smudgeUV + vec2<f32>(0.0, 0.1), 3) - fbm_imp(smudgeUV - vec2<f32>(0.0, 0.1), 3)
+                    ) * ridges;
+                    normal = normal + smudgePerturb * u.u_smudgeIntensity * 0.5;
+                }
+
+                if (u.u_scratchEnabled == 1 && nmerged > 0.0) {
+                    let scratchUV = fragXY / u.u_resolution.xy * u.u_scratchDensity;
+                    let angle = u.u_scratchAngle;
+                    let rotUV = vec2<f32>(
+                        scratchUV.x * cos(angle) - scratchUV.y * sin(angle),
+                        scratchUV.x * sin(angle) + scratchUV.y * cos(angle)
+                    );
+                    let scratch = abs(sin(rotUV.x * 50.0 + snoise_imp(rotUV * 10.0) * 5.0));
+                    let scratchLine = pow(scratch, 20.0);
+                    let scratchMask = step(0.7, hash21_imp(floor(rotUV * 3.0)));
+                    normal = normal + vec2<f32>(scratchLine * scratchMask * u.u_scratchDepth * 0.3, 0.0);
+                }
 
                 // Inline getTextureDispersion: sample u_bg and u_blurredBg with per-channel UV offsets
-                let offset = -normal *
+                var offset = -normal *
                     edgeFactor *
                     0.05 *
                     u.u_dpr *
@@ -692,6 +963,15 @@ fn main_frag(@builtin(position) fragCoord: vec4<f32>, @location(0) v_uv: vec2<f3
                         u.u_resolution.y / (u_resolution1x.x * u.u_dpr),
                         1.0
                     );
+
+                // Phase 5: Liquid flow distortion
+                if (u.u_flowEnabled == 1 && nmerged > 0.0) {
+                    let flowUV = v_uv * u.u_flowScale;
+                    let flow1 = snoise_imp(flowUV + vec2<f32>(u.u_time * u.u_flowSpeed * 0.3, 0.0));
+                    let flow2 = snoise_imp(flowUV * 1.5 + vec2<f32>(0.0, u.u_time * u.u_flowSpeed * 0.2) + vec2<f32>(50.0));
+                    offset = offset + vec2<f32>(flow1, flow2) * u.u_flowIntensity * 0.01;
+                }
+
                 let factor = u.u_refDispersion;
                 var mixRate: f32;
                 if (u.u_blurEdge > 0) {
@@ -700,13 +980,27 @@ fn main_frag(@builtin(position) fragCoord: vec4<f32>, @location(0) v_uv: vec2<f3
                     mixRate = edgeH;
                 }
 
-                let bgR = textureSample(u_bg, texSampler, v_uv + offset * (1.0 - (N_R - 1.0) * factor)).r;
-                let bgG = textureSample(u_bg, texSampler, v_uv + offset * (1.0 - (N_G - 1.0) * factor)).g;
-                let bgB = textureSample(u_bg, texSampler, v_uv + offset * (1.0 - (N_B - 1.0) * factor)).b;
+                // Phase 3: Sellmeier dispersion or standard chromatic aberration
+                var ior_r: f32;
+                var ior_g: f32;
+                var ior_b: f32;
+                if (u.u_sellmeierEnabled == 1) {
+                    ior_r = sellmeierIOR(0.65, u.u_sellmeierB, u.u_sellmeierC);
+                    ior_g = sellmeierIOR(0.55, u.u_sellmeierB, u.u_sellmeierC);
+                    ior_b = sellmeierIOR(0.45, u.u_sellmeierB, u.u_sellmeierC);
+                } else {
+                    ior_r = N_R;
+                    ior_g = N_G;
+                    ior_b = N_B;
+                }
 
-                let blurR = textureSample(u_blurredBg, texSampler, v_uv + offset * (1.0 - (N_R - 1.0) * factor)).r;
-                let blurG = textureSample(u_blurredBg, texSampler, v_uv + offset * (1.0 - (N_G - 1.0) * factor)).g;
-                let blurB = textureSample(u_blurredBg, texSampler, v_uv + offset * (1.0 - (N_B - 1.0) * factor)).b;
+                let bgR = textureSample(u_bg, texSampler, v_uv + offset * (1.0 - (ior_r - 1.0) * factor)).r;
+                let bgG = textureSample(u_bg, texSampler, v_uv + offset * (1.0 - (ior_g - 1.0) * factor)).g;
+                let bgB = textureSample(u_bg, texSampler, v_uv + offset * (1.0 - (ior_b - 1.0) * factor)).b;
+
+                let blurR = textureSample(u_blurredBg, texSampler, v_uv + offset * (1.0 - (ior_r - 1.0) * factor)).r;
+                let blurG = textureSample(u_blurredBg, texSampler, v_uv + offset * (1.0 - (ior_g - 1.0) * factor)).g;
+                let blurB = textureSample(u_blurredBg, texSampler, v_uv + offset * (1.0 - (ior_b - 1.0) * factor)).b;
 
                 var blurredPixel: vec4<f32>;
                 blurredPixel.r = mix(bgR, blurR, mixRate);
@@ -785,6 +1079,27 @@ fn main_frag(@builtin(position) fragCoord: vec4<f32>, @location(0) v_uv: vec2<f3
                     vec4<f32>(LCH_TO_SRGB(glareTintLCH), 1.0),
                     glareAngleFactor * glareGeoFactor * length(normal)
                 );
+
+                // Phase 3: Environment reflections
+                if (u.u_reflectionIntensity > 0.0) {
+                    let reflColor = sampleReflection(v_uv, normal, u.u_reflectionIntensity);
+                    let reflFresnel = pow(1.0 - max(dot(normalize(vec3<f32>(normal, 1.0)), vec3<f32>(0.0, 0.0, 1.0)), 0.0), 3.0);
+                    outColor = vec4<f32>(mix(outColor.rgb, reflColor, reflFresnel * u.u_reflectionIntensity * 0.5), outColor.a);
+                }
+
+                // Phase 3: Frosted edge
+                if (u.u_frostedEdge > 0.0) {
+                    let frosted = getFrostedEdge(merged, u.u_frostedEdge);
+                    let frostedBlurSample = textureSample(u_blurredBg, texSampler, v_uv + offset).rgb;
+                    outColor = vec4<f32>(mix(outColor.rgb, frostedBlurSample, (1.0 - frosted) * 0.5), outColor.a);
+                }
+
+                // Phase 3: Depth of field
+                if (u.u_dofIntensity > 0.0 && merged < 0.0) {
+                    let depthBlur = getDepthBlur(merged, u.u_dofIntensity);
+                    let dofBlurSample = textureSample(u_blurredBg, texSampler, v_uv + offset).rgb;
+                    outColor = vec4<f32>(mix(outColor.rgb, dofBlurSample, (1.0 - depthBlur) * 0.3), outColor.a);
+                }
             }
         } else {
             outColor = textureSample(u_bg, texSampler, v_uv);
@@ -818,6 +1133,88 @@ fn main_frag(@builtin(position) fragCoord: vec4<f32>, @location(0) v_uv: vec2<f3
             let pulseMultiplier = 1.0 + u.u_emissivePulse * 0.3;
             let emissive = u.u_emissiveColor * u.u_emissiveIntensity * emissiveFactor * pulseMultiplier;
             outColor = vec4<f32>(outColor.rgb + emissive, outColor.a);
+        }
+
+        // Phase 2: Lighting Engine
+        if (u.u_lightCount > 0 && merged < 0.0) {
+            let nmerged_lit = -1.0 * (merged * u_resolution1x.y);
+            let normal_lit = getNormal(p1, p2, fragXY);
+            let normal3D = vec3<f32>(normal_lit, sqrt(max(0.0, 1.0 - dot(normal_lit, normal_lit))));
+            let fragPos2D = fragXY / u.u_resolution.xy;
+
+            var totalSpecular = vec3<f32>(0.0);
+            for (var li: i32 = 0; li < 3; li++) {
+                if (li >= u.u_lightCount) { break; }
+                let lightPos = u.u_lights[li].xy / u.u_resolution.xy;
+                let lightIntensity = u.u_lights[li].z;
+                let lightRadius = u.u_lights[li].w;
+                let lightColor = u.u_lightColors[li].rgb;
+
+                let dist = length(fragPos2D - lightPos);
+                let attenuation = 1.0 / (1.0 + dist * dist * 10.0 / max(lightRadius * lightRadius, 0.01));
+
+                totalSpecular += computeSpecular(normal3D, fragPos2D, lightPos, lightIntensity, lightColor, u.u_specularPower) * attenuation * u.u_specularIntensity;
+
+                if (u.u_causticsEnabled == 1 && nmerged_lit > 0.0) {
+                    let caustic = computeCaustics(fragPos2D + normal_lit * 0.1, u.u_causticsScale, u.u_time);
+                    outColor = vec4<f32>(
+                        outColor.r + caustic * u.u_causticsIntensity * lightColor.r * attenuation * 0.3,
+                        outColor.g + caustic * u.u_causticsIntensity * lightColor.g * attenuation * 0.3,
+                        outColor.b + caustic * u.u_causticsIntensity * lightColor.b * attenuation * 0.3,
+                        outColor.a
+                    );
+                }
+            }
+            outColor = vec4<f32>(outColor.rgb + totalSpecular, outColor.a);
+
+            if (u.u_bevelWidth > 0.0) {
+                let bevelZone = smoothstep(0.0, u.u_bevelWidth / u.u_resolution.y, abs(nmerged_lit / u_resolution1x.y));
+                let bevelHighlight = (1.0 - bevelZone) * 0.5;
+                for (var bi: i32 = 0; bi < 3; bi++) {
+                    if (bi >= u.u_lightCount) { break; }
+                    let lightPos_b = u.u_lights[bi].xy / u.u_resolution.xy;
+                    let lightDir = normalize(lightPos_b - fragPos2D);
+                    let bevelCatch = max(dot(normal_lit, lightDir), 0.0);
+                    outColor = vec4<f32>(outColor.rgb + u.u_lightColors[bi].rgb * bevelHighlight * bevelCatch * u.u_lights[bi].z, outColor.a);
+                }
+            }
+
+            if (u.u_edgeGlowIntensity > 0.0) {
+                let edgeZone = smoothstep(2.0 / u.u_resolution.y, 0.0, abs(nmerged_lit / u_resolution1x.y));
+                outColor = vec4<f32>(outColor.rgb + u.u_edgeGlowColor * edgeZone * u.u_edgeGlowIntensity, outColor.a);
+            }
+        }
+
+        // Phase 4: Air bubbles
+        if (u.u_bubbleEnabled == 1 && merged < 0.0) {
+            for (var bi: i32 = 0; bi < 20; bi++) {
+                if (bi >= u.u_bubbleCount) { break; }
+                let bubbleCenter = hash22_imp(vec2<f32>(f32(bi) + u.u_bubbleSeed, u.u_bubbleSeed + 0.5));
+                let bubblePos = (bubbleCenter - 0.5) * 0.5;
+                let bubbleR = u.u_bubbleSize * (0.5 + hash21_imp(vec2<f32>(f32(bi), 42.0)) * 0.5) / u.u_resolution.y;
+                let pBubble = fragXY / u.u_resolution.xy - 0.5 - bubblePos;
+                let bubbleDist = length(pBubble) - bubbleR;
+                if (bubbleDist < 0.0) {
+                    let bubbleN = normalize(pBubble);
+                    let invRefract = bubbleN * 0.02;
+                    let bubbleColor = textureSample(u_blurredBg, texSampler, v_uv + invRefract).rgb;
+                    let bubbleFresnel = pow(1.0 - abs(dot(bubbleN, vec2<f32>(0.0, 1.0))), 3.0);
+                    outColor = vec4<f32>(mix(outColor.rgb, bubbleColor + vec3<f32>(bubbleFresnel * 0.3), smoothstep(0.0, -bubbleR * 0.5, bubbleDist)), outColor.a);
+                }
+            }
+        }
+
+        // Phase 4: Dust particles
+        if (u.u_dustEnabled == 1 && merged < 0.0) {
+            let dustUV = fragXY / u.u_resolution.xy * u.u_dustDensity * 100.0;
+            let dustCell = floor(dustUV);
+            let dustVal = hash21_imp(dustCell);
+            if (dustVal > 0.95) {
+                let dustPos = hash22_imp(dustCell);
+                let dustDist = length(fract(dustUV) - dustPos);
+                let dustDot = smoothstep(0.05, 0.0, dustDist);
+                outColor = vec4<f32>(outColor.rgb + vec3<f32>(dustDot * u.u_dustBrightness * 0.5), outColor.a);
+            }
         }
 
         // smooth edge
